@@ -1,116 +1,3 @@
-# import numpy as np
-# import pandas as pd
-
-# from catboost import CatBoostRegressor, Pool
-# from sklearn.model_selection import KFold
-# from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
-
-# import optuna
-
-# TARGET_YEAR = 2023
-
-# df = pd.read_parquet('data/final_dataset.parquet')
-
-# df_model = df[df["totpobla_2022"].notna()].select_dtypes('number')
-
-# target_incid_col = f'dengue_incid_{TARGET_YEAR}'
-
-# y_abs_incidence = df_model[target_incid_col]
-
-# df_model['y_log_incidence'] = np.log1p(y_abs_incidence)
-
-# for year in range(2018,2024) :
-#     df_model.drop(columns=[f'dengue_reg_{year}',f'dengue_incid_{year}'], inplace=True)
-    
-# cols_to_exclude = [
-#     'y_log_incidence',
-#     target_incid_col,
-#     'dengue_reg_2023'
-# ]
-
-# cols_to_exclude = [c for c in cols_to_exclude if c is not None and c in df_model.columns]
-
-# feature_cols = [c for c in df_model.columns if c not in cols_to_exclude]
-
-# X = df_model[feature_cols].copy()
-# y = df_model['y_log_incidence'].copy()
-
-# orthogonal_order = pd.read_csv('data/orthogonal_ordered_features.csv')['features'].tolist()
-
-# # Fix your cross-validation scheme
-# N_SPLITS = 5
-# RANDOM_SEED = 42
-
-# kf = KFold(
-#     n_splits=N_SPLITS,
-#     shuffle=True,
-#     random_state=RANDOM_SEED
-# )
-
-# def objective(trial: optuna.Trial) -> float:
-#     # ---------- 1) Top-K feature selection ----------
-#     max_k = orthogonal_order
-#     top_k = trial.suggest_int("top_k", 20, max_k)
-#     selected_features = orthogonal_order[:top_k]
-#     X_sub = X[selected_features].copy()
-    
-#     # ---------- 2) Sample CatBoost hyperparameters ----------
-#     # You can tighten/loosen these ranges later if you want
-#     params = {
-#         "loss_function": "RMSE",
-#         "eval_metric": "RMSE",
-#         "random_seed": RANDOM_SEED,
-#         "verbose": False,
-#         "allow_writing_files": False,
-#         "task_type": "CPU",  # change to "GPU" if you want & can
-        
-#         # Search space
-#         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-#         "depth": trial.suggest_int("depth", 4, 10),
-#         "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 10.0, log=True),
-#         "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 5.0),
-#         "border_count": trial.suggest_int("border_count", 32, 255),
-#         "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
-#         "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 50),
-#         "grow_policy": trial.suggest_categorical(
-#             "grow_policy", ["SymmetricTree", "Depthwise", "Lossguide"]
-#         ),
-#         # training length + early stopping
-#         "iterations": trial.suggest_int("iterations", 400, 1500),
-#         "od_type": "Iter",
-#         "od_wait": 50,
-#     }
-    
-#     # ---------- 3) Cross-validation ----------
-#     rmse_scores = []
-    
-#     for train_idx, valid_idx in kf.split(X_sub):
-#         X_train, X_valid = X_sub.iloc[train_idx], X_sub.iloc[valid_idx]
-#         y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
-        
-#         model = CatBoostRegressor(**params)
-        
-#         model.fit(
-#             X_train, y_train,
-#             eval_set=(X_valid, y_valid),
-#             use_best_model=True
-#         )
-        
-#         preds = model.predict(X_valid)
-#         rmse = np.sqrt(root_mean_squared_error(y_valid, preds))
-#         rmse_scores.append(rmse)
-    
-#     rmse_mean = float(np.mean(rmse_scores))
-#     rmse_std = float(np.std(rmse_scores))
-    
-#     # Save extra info for later analysis
-#     trial.set_user_attr("rmse_std", rmse_std)
-#     trial.set_user_attr("rmse_folds", rmse_scores)
-#     trial.set_user_attr("selected_features", selected_features)
-    
-#     return rmse_mean
-
-
 import os
 import json
 import math
@@ -455,8 +342,14 @@ def main():
         f"min_improve={state0['min_improve']}"
     )
 
+    from optuna.trial import TrialState
+
     def plateau_callback(study_obj: optuna.Study, trial: optuna.trial.FrozenTrial):
-        # load current plateau state
+        # Only care about COMPLETED trials for plateau logic
+        if trial.state != TrialState.COMPLETE:
+            return
+
+        # Load current plateau state (recomputed if missing or min_improve changed)
         st = get_plateau_state(study_obj, MIN_IMPROVE)
         best = st["best_value"]
         stale = int(st["stale"])
@@ -465,6 +358,7 @@ def main():
         if val is None or not math.isfinite(val):
             return
 
+        # Minimization: improvement = RMSE decreases by at least MIN_IMPROVE
         improved = (val <= best - float(MIN_IMPROVE))
         if improved:
             best = float(val)
@@ -477,14 +371,14 @@ def main():
         st["stale"] = stale
         set_plateau_state(study_obj, st)
 
-        print(
-            f"[plateau] trial={trial.number} value={val:.6f} "
-            f"best={best:.6f} stale={stale}/{PATIENCE_TRIALS}"
-        )
-
-        if PATIENCE_TRIALS > 0 and stale >= PATIENCE_TRIALS:
-            print("[plateau] patience reached → stopping study.")
-            study_obj.stop()
+        if PATIENCE_TRIALS:
+            print(
+                f"[plateau] trial={trial.number} value={val:.6f} "
+                f"best={best:.6f} stale={stale}/{PATIENCE_TRIALS}"
+            )
+            if stale >= PATIENCE_TRIALS:
+                print("[plateau] patience reached → stopping study.")
+                study_obj.stop()
 
 
     start_time = time.time()
