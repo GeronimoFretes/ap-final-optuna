@@ -1,0 +1,79 @@
+name: Optuna Study
+
+on:
+  workflow_dispatch: {}  # run manually from Actions tab
+  schedule:
+    - cron: "0 */6 * * *" 
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: optuna-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      PYTHONUNBUFFERED: "1"
+      STUDY_STORAGE: ${{ secrets.STUDY_STORAGE }}
+      STUDY_NAME: dengue_catboost_topk_corr0p7_2025-12-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Ensure artifacts placeholder
+        run: |
+          mkdir -p artifacts
+          echo "placeholder" > artifacts/.keep
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install catboost optuna psycopg2-binary "scikit-learn>=1.1" pandas pyarrow
+
+      - name: Run study
+        env:
+          TARGET_YEAR: "2023"
+          N_TRIALS: "40"         
+          N_SPLITS: "5"
+          RANDOM_SEED: "42"
+          STUDY_STORAGE: ${{ secrets.STUDY_STORAGE }}
+          STUDY_NAME: dengue_catboost_topk_corr0p7_2025-12-15
+          PATIENCE_TRIALS: "25"
+          MIN_IMPROVE: "0.001"
+          TIMEOUT: "19800"
+        run: |
+          python run_optuna.py
+      
+      - name: Dump current best trial to artifacts (snapshot from DB)
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, optuna
+          storage = os.environ["STUDY_STORAGE"]
+          name = os.environ["STUDY_NAME"]
+          artifacts = pathlib.Path("artifacts"); artifacts.mkdir(parents=True, exist_ok=True)
+          try:
+              study = optuna.load_study(study_name=name, storage=storage)
+              best = study.best_trial
+              # Save study_best.json
+              (artifacts / "study_best.json").write_text(json.dumps({
+                  "value": best.value,
+                  "number": best.number,
+                  "user_attrs": best.user_attrs,
+                  "params": best.params,
+              }, indent=2))
+              # Save best_params.json (raw params)
+              (artifacts / "best_params.json").write_text(json.dumps(best.params, indent=2))
+              print("Best trial snapshot written.")
+          except Exception as e:
+              print("Could not snapshot best trial:", e)
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optuna-artifacts
+          path: artifacts/**
