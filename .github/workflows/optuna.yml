@@ -14,7 +14,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       STUDY_STORAGE: ${{ secrets.STUDY_STORAGE }}
-      STUDY_NAME: dengue_catboost_topk_corr0p7_2025-12-15
+      STUDY_NAME: dengue_catboost_topk_corr0p7_2025-12-15_v2
     steps:
       - uses: actions/checkout@v4
 
@@ -35,11 +35,13 @@ jobs:
       - name: Run study
         env:
           TARGET_YEAR: "2023"
-          N_TRIALS: "40"         
           N_SPLITS: "5"
           RANDOM_SEED: "42"
+          REG_STRAT_BINS: "10"
+          N_CV_SEEDS: "3"
+          CV_SEED_STEP: "1000" 
           STUDY_STORAGE: ${{ secrets.STUDY_STORAGE }}
-          STUDY_NAME: dengue_catboost_topk_corr0p7_2025-12-15
+          STUDY_NAME: dengue_catboost_topk_corr0p7_2025-12-15_v2
           PATIENCE_TRIALS: "25"
           MIN_IMPROVE: "0.001"
           TIMEOUT: "19800"

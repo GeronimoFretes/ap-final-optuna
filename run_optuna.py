@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from catboost import CatBoostRegressor
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.metrics import root_mean_squared_error
 
 import optuna
@@ -23,6 +23,17 @@ from optuna.trial import TrialState
 TARGET_YEAR = int(os.getenv("TARGET_YEAR", 2023))
 N_SPLITS = int(os.getenv("N_SPLITS", 5))
 RANDOM_SEED = int(os.getenv("RANDOM_SEED", 42))
+
+REG_STRAT_BINS = int(os.getenv("REG_STRAT_BINS", "10"))
+
+CV_SEEDS_ENV = os.getenv("CV_SEEDS", "").strip()
+N_CV_SEEDS = int(os.getenv("N_CV_SEEDS", "3"))
+CV_SEED_STEP = int(os.getenv("CV_SEED_STEP", "1000"))
+
+if CV_SEEDS_ENV:
+    CV_SEEDS = [int(s.strip()) for s in CV_SEEDS_ENV.split(",") if s.strip()]
+else:
+    CV_SEEDS = [RANDOM_SEED + i * CV_SEED_STEP for i in range(N_CV_SEEDS)]
 
 PATIENCE_TRIALS = int(os.getenv("PATIENCE_TRIALS", "20"))
 MIN_IMPROVE = float(os.getenv("MIN_IMPROVE", "1e-3"))
@@ -38,7 +49,7 @@ ORTHO_FEATURES_CSV = Path("data/orthogonal_ordered_features.csv")
 ARTIFACTS_DIR = Path("artifacts")
 
 # Plateau state key in study.user_attrs
-PLATEAU_KEY = "plateau_state_rmse_v2"
+PLATEAU_KEY = "plateau_state_rmse_v1"
 
 
 # ============================================================
@@ -59,6 +70,38 @@ def param_signature(params: dict) -> str:
     payload = {k: _norm(v) for k, v in sorted(params.items())}
     s = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
+
+
+def make_regression_strat_bins(y: pd.Series, n_bins: int, n_splits: int):
+    """
+    Create quantile bins for regression stratification.
+    Returns integer bin labels or None if we can't create valid bins.
+    """
+    y = pd.Series(y).reset_index(drop=True)
+
+    for q in range(int(n_bins), 1, -1):
+        try:
+            b = pd.qcut(y, q=q, duplicates="drop")
+            # Must have enough samples per bin to stratify into n_splits
+            vc = b.value_counts()
+            if (vc < n_splits).any():
+                continue
+            return b.cat.codes.to_numpy()
+        except ValueError:
+            continue
+
+    return None
+
+
+def get_cv_splitter(y: pd.Series, seed: int):
+    """
+    Prefer StratifiedKFold on quantile bins. Fall back to KFold if binning fails.
+    Returns (splitter, strat_labels_or_none).
+    """
+    strat = make_regression_strat_bins(y, REG_STRAT_BINS, N_SPLITS)
+    if strat is None:
+        return KFold(n_splits=N_SPLITS, shuffle=True, random_state=seed), None
+    return StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=seed), strat
 
 
 # ============================================================
@@ -213,15 +256,9 @@ def load_orthogonal_order(X: pd.DataFrame):
 # Optuna Objective
 # ============================================================
 def make_objective(X, y, orthogonal_order):
-    kf = KFold(
-        n_splits=N_SPLITS,
-        shuffle=True,
-        random_state=RANDOM_SEED,
-    )
-
     def objective(trial: optuna.Trial) -> float:
         # ---------- 1) choose top-K features ----------
-        max_k = min(len(orthogonal_order), 90)  # small cap; adjust if needed
+        max_k = min(len(orthogonal_order), 90)
         top_k = trial.suggest_int("top_k", 20, max_k)
         selected_features = orthogonal_order[:top_k]
         X_sub = X[selected_features].copy()
@@ -230,7 +267,6 @@ def make_objective(X, y, orthogonal_order):
         params = {
             "loss_function": "RMSE",
             "eval_metric": "RMSE",
-            "random_seed": RANDOM_SEED,
             "verbose": False,
             "allow_writing_files": False,
             "task_type": "CPU",
@@ -262,47 +298,87 @@ def make_objective(X, y, orthogonal_order):
         for t in completed:
             ps = t.user_attrs.get("param_sig")
             if ps is None:
-                ps = param_signature(t.params)  # for older trials
+                ps = param_signature(t.params)
             seen_sigs.add(ps)
 
         if sig in seen_sigs:
-            # exact repetition of an existing COMPLETE trial
             raise optuna.TrialPruned("duplicate-params")
 
-        # ---------- 4) CV loop ----------
-        rmse_scores = []
-        for fold_idx, (train_idx, valid_idx) in enumerate(kf.split(X_sub)):
-            X_train, X_valid = X_sub.iloc[train_idx], X_sub.iloc[valid_idx]
-            y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
+        # ---------- 4) Multi-seed stratified CV ----------
+        # We evaluate each trial across multiple CV seeds and average the seed-means.
+        rmse_seed_means = []
+        rmse_all_folds = []
+        per_seed_details = []
 
-            model = CatBoostRegressor(**params)
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=(X_valid, y_valid),
-                use_best_model=True,
+        global_step = 0
+        used_stratified_any = False
+
+        for seed_i, cv_seed in enumerate(CV_SEEDS):
+            splitter, strat_labels = get_cv_splitter(y, seed=cv_seed)
+            used_stratified = strat_labels is not None
+            used_stratified_any = used_stratified_any or used_stratified
+
+            fold_rmses = []
+
+            if strat_labels is None:
+                split_iter = splitter.split(X_sub)
+            else:
+                split_iter = splitter.split(X_sub, strat_labels)
+
+            for fold_idx, (train_idx, valid_idx) in enumerate(split_iter):
+                X_train, X_valid = X_sub.iloc[train_idx], X_sub.iloc[valid_idx]
+                y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
+
+                # Make training deterministic but different per (cv_seed, fold)
+                params_fold = dict(params)
+                params_fold["random_seed"] = int(cv_seed + fold_idx)
+
+                model = CatBoostRegressor(**params_fold)
+                model.fit(
+                    X_train,
+                    y_train,
+                    eval_set=(X_valid, y_valid),
+                    use_best_model=True,
+                )
+
+                preds = model.predict(X_valid)
+                rmse = root_mean_squared_error(y_valid, preds)
+
+                fold_rmses.append(float(rmse))
+                rmse_all_folds.append(float(rmse))
+
+                # Report running mean (more stable than reporting raw fold RMSE)
+                global_step += 1
+                trial.report(float(np.mean(rmse_all_folds)), step=global_step)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            seed_mean = float(np.mean(fold_rmses))
+            rmse_seed_means.append(seed_mean)
+            per_seed_details.append(
+                {
+                    "cv_seed": int(cv_seed),
+                    "used_stratified": bool(used_stratified),
+                    "fold_rmses": fold_rmses,
+                    "seed_mean": seed_mean,
+                }
             )
 
-            preds = model.predict(X_valid)
-            rmse = root_mean_squared_error(y_valid, preds)
-            rmse_scores.append(rmse)
-
-            # Report intermediate value per fold so pruner can act
-            trial.report(float(rmse), step=fold_idx)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
-
-        rmse_mean = float(np.mean(rmse_scores))
-        rmse_std = float(np.std(rmse_scores))
+        rmse_mean = float(np.mean(rmse_seed_means))
+        rmse_std_across_seeds = float(np.std(rmse_seed_means))
 
         trial.set_user_attr("rmse_mean", rmse_mean)
-        trial.set_user_attr("rmse_std", rmse_std)
-        trial.set_user_attr("rmse_folds", rmse_scores)
+        trial.set_user_attr("rmse_std_across_seeds", rmse_std_across_seeds)
+        trial.set_user_attr("rmse_seed_means", rmse_seed_means)
+        trial.set_user_attr("cv_seeds", [int(s) for s in CV_SEEDS])
+        trial.set_user_attr("used_stratified_any", bool(used_stratified_any))
+        trial.set_user_attr("per_seed_details", per_seed_details)
         trial.set_user_attr("selected_features", selected_features)
 
-        return rmse_mean  # Optuna minimizes this
+        return rmse_mean
 
     return objective
+
 
 
 # ============================================================
