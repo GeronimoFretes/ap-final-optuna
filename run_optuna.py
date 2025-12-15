@@ -38,7 +38,7 @@ ORTHO_FEATURES_CSV = Path("data/orthogonal_ordered_features.csv")
 ARTIFACTS_DIR = Path("artifacts")
 
 # Plateau state key in study.user_attrs
-PLATEAU_KEY = "plateau_state_rmse_v1"
+PLATEAU_KEY = "plateau_state_rmse_v2"
 
 
 # ============================================================
