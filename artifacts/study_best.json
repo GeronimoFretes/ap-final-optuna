@@ -1,0 +1,92 @@
+{
+  "value": 1.24108406279174,
+  "number": 22,
+  "user_attrs": {
+    "cv_seeds": [
+      42,
+      1042,
+      2042
+    ],
+    "param_sig": "20ed341011d2",
+    "per_seed_details": [
+      {
+        "cv_seed": 42,
+        "used_stratified": true,
+        "fold_rmses": [
+          1.3221693556538274,
+          1.0571396552164771,
+          1.2084708983064634,
+          1.288287379770914,
+          1.2432756548142392
+        ],
+        "seed_mean": 1.2238685887523841
+      },
+      {
+        "cv_seed": 1042,
+        "used_stratified": true,
+        "fold_rmses": [
+          1.3891536072185844,
+          1.136765598444603,
+          1.2218190819605677,
+          1.1590055919904398,
+          1.2828977888826854
+        ],
+        "seed_mean": 1.2379283336993763
+      },
+      {
+        "cv_seed": 2042,
+        "used_stratified": true,
+        "fold_rmses": [
+          1.3278057729034465,
+          1.1980422095789287,
+          1.2183151483416734,
+          1.3544799839333446,
+          1.208633214859901
+        ],
+        "seed_mean": 1.261455265923459
+      }
+    ],
+    "rmse_mean": 1.2410840627917399,
+    "rmse_seed_means": [
+      1.2238685887523841,
+      1.2379283336993763,
+      1.261455265923459
+    ],
+    "rmse_std_across_seeds": 0.015506096538006007,
+    "selected_features": [
+      "material_share_mid_quality",
+      "ambient_share_cells_risk_q75plus",
+      "dengue_incid_prev3",
+      "dengue_reg_prev3",
+      "ambient_risk_mean",
+      "material_hh_qual3",
+      "ambient_n_cells_total",
+      "ambient_share_cells_risk_q90plus",
+      "ambient_risk_std",
+      "ivsd_housing_vul",
+      "ivsd_basic_services_vul",
+      "material_share_qual2",
+      "renabap_energy_grid_but_nonstandard_or_informal__share_families",
+      "estrato_share_seg5",
+      "material_share_qual1",
+      "dengue_n_years_with",
+      "ivsd_demographic_vul",
+      "ivsd_youth_education_gap",
+      "dengue_years_since_last_epidemic",
+      "excl_incidence_std"
+    ],
+    "used_stratified_any": true
+  },
+  "params": {
+    "top_k": 20,
+    "learning_rate": 0.0214667391206604,
+    "depth": 9,
+    "l2_leaf_reg": 0.228698902409076,
+    "bagging_temperature": 3.4575571694646,
+    "border_count": 103,
+    "random_strength": 1.99773782741759,
+    "min_data_in_leaf": 25,
+    "grow_policy": "Lossguide",
+    "iterations": 1332
+  }
+}

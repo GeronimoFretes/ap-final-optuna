@@ -1,0 +1,12 @@
+{
+  "top_k": 20,
+  "learning_rate": 0.0214667391206604,
+  "depth": 9,
+  "l2_leaf_reg": 0.228698902409076,
+  "bagging_temperature": 3.4575571694646,
+  "border_count": 103,
+  "random_strength": 1.99773782741759,
+  "min_data_in_leaf": 25,
+  "grow_policy": "Lossguide",
+  "iterations": 1332
+}

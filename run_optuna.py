@@ -18,7 +18,7 @@ from optuna.pruners import MedianPruner
 from optuna.trial import TrialState
 
 # ============================================================
-# Config via environment variables
+# Config
 # ============================================================
 TARGET_YEAR = int(os.getenv("TARGET_YEAR", 2023))
 N_SPLITS = int(os.getenv("N_SPLITS", 5))
@@ -48,12 +48,11 @@ DATA_PATH = Path("data/final_dataset.parquet")
 ORTHO_FEATURES_CSV = Path("data/orthogonal_ordered_features.csv")
 ARTIFACTS_DIR = Path("artifacts")
 
-# Plateau state key in study.user_attrs
 PLATEAU_KEY = "plateau_state_rmse_v1"
 
 
 # ============================================================
-# Utilities: param signature (duplicate guard)
+# Utilities
 # ============================================================
 def param_signature(params: dict) -> str:
     """
@@ -104,8 +103,86 @@ def get_cv_splitter(y: pd.Series, seed: int):
     return StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=seed), strat
 
 
+def compute_past_features(df_dengue_annual, target_year):
+    df_dengue_annual = df_dengue_annual.copy()
+    
+    year_cols = [int(c.split('_')[-1]) for c in df_dengue_annual.columns if c.startswith('dengue_reg_')]
+    year_cols = sorted(year_cols)
+    
+    past_years = [y for y in year_cols if y < target_year]
+
+    reg_past_cols = [f'dengue_reg_{y}' for y in past_years]
+    inc_past_cols = [f'dengue_incid_{y}' for y in past_years]
+
+    def safe_get(colname, df, default=0.0):
+        return df[colname] if colname in df.columns else default
+
+    df_dengue_annual['dengue_reg_prev1'] = safe_get(f'dengue_reg_{target_year-1}', df_dengue_annual, 0.0)
+    df_dengue_annual['dengue_reg_prev2'] = safe_get(f'dengue_reg_{target_year-2}', df_dengue_annual, 0.0)
+    df_dengue_annual['dengue_reg_prev3'] = safe_get(f'dengue_reg_{target_year-3}', df_dengue_annual, 0.0)
+
+    df_dengue_annual['dengue_incid_prev1'] = safe_get(f'dengue_incid_{target_year-1}', df_dengue_annual, 0.0)
+    df_dengue_annual['dengue_incid_prev2'] = safe_get(f'dengue_incid_{target_year-2}', df_dengue_annual, 0.0)
+    df_dengue_annual['dengue_incid_prev3'] = safe_get(f'dengue_incid_{target_year-3}', df_dengue_annual, 0.0)
+
+    reg_past_vals = df_dengue_annual[reg_past_cols].to_numpy() if reg_past_cols else None
+    inc_past_vals = df_dengue_annual[inc_past_cols].to_numpy() if inc_past_cols else None
+
+    if reg_past_vals is not None:
+        df_dengue_annual['dengue_reg_hist_mean'] = reg_past_vals.mean(axis=1)
+        df_dengue_annual['dengue_reg_hist_max']  = reg_past_vals.max(axis=1)
+        df_dengue_annual['dengue_reg_hist_std']  = reg_past_vals.std(axis=1)
+
+    if inc_past_vals is not None:
+        df_dengue_annual['dengue_incid_past_mean'] = inc_past_vals.mean(axis=1)
+        df_dengue_annual['dengue_incid_past_max']  = inc_past_vals.max(axis=1)
+        df_dengue_annual['dengue_incid_past_std']  = inc_past_vals.std(axis=1)
+
+    if reg_past_vals is not None:
+        df_dengue_annual['dengue_ever'] = (reg_past_vals.sum(axis=1) > 0).astype(int)
+
+        df_dengue_annual['dengue_n_years_with'] = (reg_past_vals > 0).sum(axis=1)
+
+        positive_inc_vals = inc_past_vals[inc_past_vals > 0]
+        if positive_inc_vals.size > 0:
+            epidemic_threshold = np.percentile(positive_inc_vals, 75)
+        else:
+            epidemic_threshold = 0.0
+
+        epidemic_mask = (inc_past_vals >= epidemic_threshold).astype(int)
+        df_dengue_annual['dengue_n_epidemic_years'] = epidemic_mask.sum(axis=1)
+
+        last_epi_years = []
+        for row in inc_past_vals:
+            epi_years_for_row = [y for y, val in zip(past_years, row) if val >= epidemic_threshold and val > 0]
+            if len(epi_years_for_row) == 0:
+                last_epi_years.append(np.nan)
+            else:
+                last_epi_years.append(max(epi_years_for_row))
+
+        df_dengue_annual['dengue_years_since_last_epidemic'] = target_year - pd.Series(last_epi_years, index=df_dengue_annual.index)
+
+        eps = 1e-6
+        df_dengue_annual['dengue_recent_vs_hist_ratio'] = (
+            df_dengue_annual['dengue_incid_prev1'] / (df_dengue_annual['dengue_incid_past_mean'] + eps)
+        )
+
+        df_dengue_annual['dengue_volatility_incid'] = (
+            df_dengue_annual['dengue_incid_past_std'] / (df_dengue_annual['dengue_incid_past_mean'] + eps)
+        )
+    else:
+        for col in ['dengue_ever_dengue', 'dengue_n_years_with', 'dengue_n_epidemic_years',
+                    'dengue_years_since_last_epidemic', 'dengue_recent_vs_hist_ratio', 'dengue_volatility_incid']:
+            df_dengue_annual[col] = np.nan
+            
+    for year in year_cols :
+        df_dengue_annual.drop(columns=[f'dengue_reg_{year}',f'dengue_incid_{year}'], inplace=True)
+            
+    return df_dengue_annual
+
+
 # ============================================================
-# Plateau helpers (for minimization: lower RMSE is better)
+# Plateau helpers
 # ============================================================
 def _plateau_scan(trials, min_improve: float):
     """
@@ -134,7 +211,6 @@ def _plateau_scan(trials, min_improve: float):
             stale += 1
             continue
 
-        # minimization: improvement if RMSE decreases by at least min_improve
         if v <= best - float(min_improve):
             best = v
             best_trial = t.number
@@ -201,26 +277,16 @@ def load_data():
     if target_incid_col not in df_model.columns:
         raise ValueError(f"Target column {target_incid_col} not found in df_model.")
 
-    # Define target: log(1 + annual incidence)
     y_abs_incidence = df_model[target_incid_col]
     df_model["y_log_incidence"] = np.log1p(y_abs_incidence)
 
-    # Drop yearly incidence + reg series (2018..TARGET_YEAR)
-    drop_cols = []
-    for year in range(2018, TARGET_YEAR + 1):
-        drop_cols.extend([f"dengue_reg_{year}", f"dengue_incid_{year}"])
+    df_model = compute_past_features(df_model, TARGET_YEAR)
 
-    drop_cols = [c for c in drop_cols if c in df_model.columns]
-    if drop_cols:
-        df_model = df_model.drop(columns=drop_cols)
-
-    # Explicit leakage / target cols to exclude as features
     cols_to_exclude = [
         "y_log_incidence",
         target_incid_col,
-        "dengue_reg_2023",  # may or may not exist, safe filter below
+        "dengue_reg_2023",
     ]
-    cols_to_exclude = [c for c in cols_to_exclude if c in df_model.columns]
 
     feature_cols = [c for c in df_model.columns if c not in cols_to_exclude]
 
@@ -257,13 +323,12 @@ def load_orthogonal_order(X: pd.DataFrame):
 # ============================================================
 def make_objective(X, y, orthogonal_order):
     def objective(trial: optuna.Trial) -> float:
-        # ---------- 1) choose top-K features ----------
+        
         max_k = min(len(orthogonal_order), 90)
         top_k = trial.suggest_int("top_k", 20, max_k)
         selected_features = orthogonal_order[:top_k]
         X_sub = X[selected_features].copy()
 
-        # ---------- 2) CatBoost hyperparameters ----------
         params = {
             "loss_function": "RMSE",
             "eval_metric": "RMSE",
@@ -286,7 +351,6 @@ def make_objective(X, y, orthogonal_order):
             "od_wait": 50,
         }
 
-        # ---------- 3) duplicate guard ----------
         sig = param_signature(trial.params)
         trial.set_user_attr("param_sig", sig)
 
@@ -304,8 +368,6 @@ def make_objective(X, y, orthogonal_order):
         if sig in seen_sigs:
             raise optuna.TrialPruned("duplicate-params")
 
-        # ---------- 4) Multi-seed stratified CV ----------
-        # We evaluate each trial across multiple CV seeds and average the seed-means.
         rmse_seed_means = []
         rmse_all_folds = []
         per_seed_details = []
@@ -329,7 +391,6 @@ def make_objective(X, y, orthogonal_order):
                 X_train, X_valid = X_sub.iloc[train_idx], X_sub.iloc[valid_idx]
                 y_train, y_valid = y.iloc[train_idx], y.iloc[valid_idx]
 
-                # Make training deterministic but different per (cv_seed, fold)
                 params_fold = dict(params)
                 params_fold["random_seed"] = int(cv_seed + fold_idx)
 
@@ -392,7 +453,6 @@ def main():
 
     objective = make_objective(X, y, orthogonal_order)
 
-    # Sampler + pruner
     sampler = TPESampler(
         seed=RANDOM_SEED,
         multivariate=True,
@@ -401,7 +461,6 @@ def main():
     )
     pruner = MedianPruner(n_warmup_steps=2)
 
-    # Study with storage → can resume
     study = optuna.create_study(
         direction="minimize",
         study_name=STUDY_NAME,
@@ -421,11 +480,9 @@ def main():
     from optuna.trial import TrialState
 
     def plateau_callback(study_obj: optuna.Study, trial: optuna.trial.FrozenTrial):
-        # Only care about COMPLETED trials for plateau logic
         if trial.state != TrialState.COMPLETE:
             return
 
-        # Load current plateau state (recomputed if missing or min_improve changed)
         st = get_plateau_state(study_obj, MIN_IMPROVE)
         best = st["best_value"]
         stale = int(st["stale"])
@@ -434,7 +491,6 @@ def main():
         if val is None or not math.isfinite(val):
             return
 
-        # Minimization: improvement = RMSE decreases by at least MIN_IMPROVE
         improved = (val <= best - float(MIN_IMPROVE))
         if improved:
             best = float(val)
@@ -476,7 +532,6 @@ def main():
         f"(timeout={TIMEOUT}, patience={PATIENCE_TRIALS}, min_improve={MIN_IMPROVE})"
     )
 
-    # Run until plateau or timeout; n_trials=None means "unbounded"
     study.optimize(
         objective,
         n_trials=None,

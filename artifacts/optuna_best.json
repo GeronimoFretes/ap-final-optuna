@@ -1,0 +1,46 @@
+{
+  "best_value_rmse": 1.24108406279174,
+  "best_params": {
+    "top_k": 20,
+    "learning_rate": 0.0214667391206604,
+    "depth": 9,
+    "l2_leaf_reg": 0.228698902409076,
+    "bagging_temperature": 3.4575571694646,
+    "border_count": 103,
+    "random_strength": 1.99773782741759,
+    "min_data_in_leaf": 25,
+    "grow_policy": "Lossguide",
+    "iterations": 1332
+  },
+  "rmse_std": null,
+  "rmse_folds": null,
+  "top_k": 20,
+  "selected_features": [
+    "material_share_mid_quality",
+    "ambient_share_cells_risk_q75plus",
+    "dengue_incid_prev3",
+    "dengue_reg_prev3",
+    "ambient_risk_mean",
+    "material_hh_qual3",
+    "ambient_n_cells_total",
+    "ambient_share_cells_risk_q90plus",
+    "ambient_risk_std",
+    "ivsd_housing_vul",
+    "ivsd_basic_services_vul",
+    "material_share_qual2",
+    "renabap_energy_grid_but_nonstandard_or_informal__share_families",
+    "estrato_share_seg5",
+    "material_share_qual1",
+    "dengue_n_years_with",
+    "ivsd_demographic_vul",
+    "ivsd_youth_education_gap",
+    "dengue_years_since_last_epidemic",
+    "excl_incidence_std"
+  ],
+  "plateau_state": {
+    "best_value": 1.24108406279174,
+    "best_trial": 22,
+    "stale": 25,
+    "min_improve": 0.001
+  }
+}
